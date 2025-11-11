@@ -7,6 +7,7 @@
         "dev": "nodemon src/server.js"
     },
     "dependencies": {
+        "@google/generative-ai": "^0.24.1",
         "@supabase/supabase-js": "^2.80.0",
         "cors": "^2.8.5",
         "dotenv": "^17.2.3",
@@ -16,7 +17,11 @@
         "nodemon": "^2.0.22"
     },
     "description": "This repository contains a minimal Node/Express scaffold for the Neurazor backend.",
-    "keywords": ["neurazor", "assessment", "scoring"],
+    "keywords": [
+        "neurazor",
+        "assessment",
+        "scoring"
+    ],
     "author": "Ananya",
     "license": "MIT"
 }
