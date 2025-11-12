@@ -336,70 +336,164 @@ class CalculatorService {
         };
     }
 
+/**
+ * Card Flip Challenge Calculator - v2 (Robust Logic)
+ */
+calculateCardFlip(rawData, config) {
+
+    // --- Helper Functions (MOVED INSIDE) ---
+    // By placing these helpers here, they are defined within 
+    // the scope of calculateCardFlip and won't cause a syntax error.
+
     /**
-     * Card Flip Challenge Calculator
+     * Returns the correct pattern-checking function based on the session type.
+     * N = total cards, C = total columns
      */
-    calculateCardFlip(rawData, config) {
-        const weights = config.final_weights;
-
-        const correctPairs = rawData.correct_pairs || 0;
-        const totalPairs = rawData.total_pairs || 10;
-        const totalFlips = rawData.total_flips || 20;
-        const minFlips = rawData.minimum_flips || totalPairs * 2;
-        const timeTaken = rawData.time_taken || 0;
-        const timeLimit = rawData.time_limit || 60;
-        const patternDiscovered = rawData.pattern_discovered || false;
-
-        // Pattern Recognition
-        const patternRecognition = (correctPairs / totalPairs) * 100;
-
-        // Reasoning
-        const reasoning = ((minFlips / totalFlips) * 100 * 0.5) + (patternRecognition * 0.5);
-
-        // Speed
-        const speed = Math.max(0, ((timeLimit - timeTaken) / timeLimit) * 100);
-
-        // Strategy (bonus for discovering pattern)
-        const strategyScore = patternDiscovered ? 100 : 50;
-
-        const finalScore =
-            (patternRecognition * weights.pattern_recognition) +
-            (reasoning * weights.reasoning) +
-            (strategyScore * weights.strategy) +
-            (speed * weights.speed);
-
-        return {
-            final_score: parseFloat(finalScore.toFixed(2)),
-            competencies: {
-                pattern_recognition: {
-                    raw: parseFloat(patternRecognition.toFixed(2)),
-                    weighted: parseFloat((patternRecognition * weights.pattern_recognition).toFixed(2)),
-                    weight: weights.pattern_recognition
-                },
-                reasoning: {
-                    raw: parseFloat(reasoning.toFixed(2)),
-                    weighted: parseFloat((reasoning * weights.reasoning).toFixed(2)),
-                    weight: weights.reasoning
-                },
-                strategy: {
-                    raw: parseFloat(strategyScore.toFixed(2)),
-                    weighted: parseFloat((strategyScore * weights.strategy).toFixed(2)),
-                    weight: weights.strategy
-                },
-                speed: {
-                    raw: parseFloat(speed.toFixed(2)),
-                    weighted: parseFloat((speed * weights.speed).toFixed(2)),
-                    weight: weights.speed
-                }
-            },
-            raw_stats: {
-                correct_pairs: correctPairs,
-                total_flips: totalFlips,
-                time_taken: timeTaken,
-                pattern_discovered: patternDiscovered
-            }
-        };
+    function getPatternChecker(patternType) {
+        switch (patternType) {
+            case 'mirror':
+                // pos1 + pos2 === N - 1
+                return (p1, p2, N, C) => p1 + p2 === N - 1;
+            case 'sequential':
+                // |pos1 - pos2| === 1 AND min(pos1, pos2) is even
+                return (p1, p2, N, C) => Math.abs(p1 - p2) === 1 && Math.min(p1, p2) % 2 === 0;
+            case 'split':
+                // |pos1 - pos2| === N / 2
+                return (p1, p2, N, C) => Math.abs(p1 - p2) === N / 2;
+            case 'adjacentColumn':
+                // Same row, |col1 - col2| === 1, AND min(col) is even
+                return (p1, p2, N, C) => {
+                    const r1 = Math.floor(p1 / C), r2 = Math.floor(p2 / C);
+                    const c1 = p1 % C, c2 = p2 % C;
+                    return r1 === r2 && Math.abs(c1 - c2) === 1 && Math.min(c1, c2) % 2 === 0;
+                };
+            default:
+                // Failsafe, no pattern will match
+                return () => false;
+        }
     }
+
+    /**
+     * Calculates the dynamic Pattern Recognition score.
+     */
+    function calculateDynamicPatternRecognition(correctMatches, totalPairs, patternType, discoveryMove) {
+        if (!correctMatches || correctMatches.length === 0) return 0;
+
+        // Get the function to check against this session's pattern
+        const patternChecker = getPatternChecker(patternType); 
+        
+        const totalCards = totalPairs * 2;
+        const N = totalCards;
+        const C = totalCards === 20 ? 5 : 6; // Simple check
+
+        let patternMatches = 0;
+        let nonPatternMatches = 0;
+
+        for (const match of correctMatches) {
+            if (patternChecker(match.pos1, match.pos2, N, C)) {
+                patternMatches++;
+            } else {
+                nonPatternMatches++;
+            }
+        }
+
+        // 1. Calculate Base Score
+        let baseScore = (patternMatches / correctMatches.length) * 100;
+
+        // 2. Apply Early Discovery Bonus
+        let bonus = 0;
+        if (discoveryMove > 0) {
+            let earlyFactor = 1 - (discoveryMove / totalPairs); // How early (0 to 1)
+            bonus = earlyFactor * 20; // Max 20 point bonus
+        }
+
+        // 3. Apply Random Match Penalty
+        if (nonPatternMatches > patternMatches * 2) {
+            baseScore = baseScore * 0.5; // 50% penalty
+        }
+
+        return Math.min(100, baseScore + bonus);
+    }
+
+    // --- Main Scoring Function (STARTS HERE) ---
+    
+    // NOTE: Your config.final_weights must now match these keys:
+    // { accuracy: 0.25, strategy_efficiency: 0.15, speed: 0.20, pattern_recognition: 0.40 }
+    const weights = config.final_weights;
+
+    // --- 1. Get Raw Data ---
+    const correctPairs = rawData.correct_pairs || 0;
+    const totalPairs = rawData.total_pairs || 10; 
+    const totalFlips = rawData.total_flips || 0;
+    const minFlips = rawData.minimum_flips || totalPairs * 2;
+    const timeTaken = rawData.time_taken || 0;
+    const timeLimit = rawData.time_limit || 60;
+    
+    // --- NEW REQUIRED DATA ---
+    const sessionPatternType = rawData.session_pattern_type || 'mirror'; 
+    const correctMatches = rawData.correct_matches || []; 
+    const discoveryMove = rawData.discovery_move || 0; 
+
+    // --- 2. Calculate the 4 Competencies ---
+
+    // A. Accuracy
+    const accuracyScore = (totalPairs > 0) ? (correctPairs / totalPairs) * 100 : 0;
+
+    // B. Strategy / Efficiency
+    const strategyEfficiencyScore = (totalFlips > 0) ? (minFlips / totalFlips) * 100 : 0;
+
+    // C. Speed
+    const speedScore = Math.max(0, ((timeLimit - timeTaken) / timeLimit) * 100);
+    
+    // D. Pattern Recognition
+    const patternRecognitionScore = calculateDynamicPatternRecognition(
+        correctMatches,
+        totalPairs,
+        sessionPatternType,
+        discoveryMove
+    );
+
+    // --- 3. Calculate Final Score ---
+    const finalScore =
+        (accuracyScore * weights.accuracy) +
+        (strategyEfficiencyScore * weights.strategy_efficiency) +
+        (speedScore * weights.speed) +
+        (patternRecognitionScore * weights.pattern_recognition);
+
+    // --- 4. Return Results ---
+    return {
+        final_score: parseFloat(finalScore.toFixed(2)),
+        competencies: {
+            pattern_recognition: {
+                raw: parseFloat(patternRecognitionScore.toFixed(2)),
+                weighted: parseFloat((patternRecognitionScore * weights.pattern_recognition).toFixed(2)),
+                weight: weights.pattern_recognition
+            },
+            accuracy: {
+                raw: parseFloat(accuracyScore.toFixed(2)),
+                weighted: parseFloat((accuracyScore * weights.accuracy).toFixed(2)),
+                weight: weights.accuracy
+            },
+            strategy_efficiency: {
+                raw: parseFloat(strategyEfficiencyScore.toFixed(2)),
+                weighted: parseFloat((strategyEfficiencyScore * weights.strategy_efficiency).toFixed(2)),
+                weight: weights.strategy_efficiency
+            },
+            speed: {
+                raw: parseFloat(speedScore.toFixed(2)),
+                weighted: parseFloat((speedScore * weights.speed).toFixed(2)),
+                weight: weights.speed
+            }
+        },
+        raw_stats: {
+            correct_pairs: correctPairs,
+            total_flips: totalFlips,
+            time_taken: timeTaken,
+            pattern_discovered: discoveryMove > 0, // Converted to boolean
+            pattern_type: sessionPatternType
+        }
+    };
+}
 
     /**
      * Lucky Flip Calculator
