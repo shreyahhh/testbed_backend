@@ -1,0 +1,279 @@
+# NeuRazor Backend – Project Overview
+
+A Node.js/Express backend for cognitive/AI games. It calculates scores (locally and via Gemini), persists sessions in Supabase, and exposes REST endpoints for configs, content, scoring, and history.
+
+- Runtime: Node.js
+- Framework: Express
+- DB: Supabase (Postgres)
+- AI: Google Gemini (via @google/generative-ai + REST v1 fallback)
+- Auth (server-to-DB): Supabase Service Role key (no user auth here)
+
+---
+
+## Quick Start
+
+- Install: `npm install`
+- Run dev: `npm run dev` (or `node src/server.js`)
+- Health: GET http://localhost:3000/health
+
+Env (set in .env or Render dashboard):
+- NEXT_PUBLIC_SUPABASE_URL
+- SUPABASE_SERVICE_ROLE_KEY
+- GEMINI_API_KEY
+- FRONTEND_URL (for CORS)
+- NEXT_PUBLIC_API_BASE_URL (frontend convenience)
+
+---
+
+## API Surface
+
+Base URL: http://localhost:3000
+
+Health
+- GET /health
+
+Scoring Config
+- GET /api/scoring/active/:gameType
+  - Returns active scoring version and config for a game type (weights, AI prompts, variables, etc.)
+
+Game Content (mocked for now)
+- GET /api/content/:gameType
+  - Returns scenario/topic payloads. Currently returns hardcoded defaults in controller.
+
+AI (LLM) Scoring (no persistence)
+- POST /api/ai/score
+  - Body: { game_type, response_data }
+  - Returns ai_scores + final_scores (not saved)
+
+AI Game Submit (persist)
+- POST /api/ai/submit-game
+  - Body: { game_type, user_id, response_data }
+  - Saves a test session row; returns ai_scores + final_scores
+
+Non‑AI Game Submit (persist)
+- POST /api/games/submit
+  - Body: { game_type, user_id, raw_data }
+  - Calculates locally (calculator.service/scoringCalculator) and saves
+
+History
+- GET /api/games/results/:gameType?userId=UUID
+  - Returns saved sessions for the user/game
+
+---
+
+## Core Flows
+
+AI‑scored games (ai_debate, scenario_challenge, creative_uses, …)
+1) Frontend calls /api/ai/score (preview) or /api/ai/submit-game (save)
+2) ai.controller orchestrates:
+   - loads active scoring config (weights, AI prompts)
+   - builds AI prompt and calls Gemini via ai.service
+   - produces ai_scores 0–100 per competency
+   - calculator.service applies final_weights to ai_scores → final_score
+   - submit-game also inserts a session in Supabase
+3) Response returns ai_scores, final_scores (+ session_id for submit)
+
+Locally‑scored games (sign_sudoku, card_flip_challenge, mental_math_sprint, …)
+1) Frontend calls /api/games/submit with raw_data
+2) games.controller calls calculator.service (or scoringCalculator for dynamic formulas)
+3) Final result saved in Supabase and returned
+
+---
+
+## Data Model (Supabase)
+
+- scoring_versions
+  - game_type (text)
+  - version (text, e.g., “V1”)
+  - is_active (bool)
+  - config (jsonb) – contains final_weights, ai_prompts, optional competency_formulas, variables
+- test_sessions
+  - id (uuid)
+  - user_id (uuid)
+  - game_type (text)
+  - version_used (text)
+  - ai_scores (jsonb) – when AI game
+  - final_scores (jsonb)
+  - raw_data / response_data (jsonb)
+  - created_at (timestamp)
+
+Note: Actual columns may differ; check your Supabase schema.
+
+---
+
+## Environment Variables
+
+- NEXT_PUBLIC_SUPABASE_URL – Supabase URL
+- SUPABASE_SERVICE_ROLE_KEY – Server secret (don’t expose in client)
+- GEMINI_API_KEY – Google Generative Language API key
+- FRONTEND_URL – Your frontend base (used for CORS)
+- NEXT_PUBLIC_API_BASE_URL – Frontend convenience for API base URL
+- NODE_ENV – development/production
+
+Security notes
+- Never commit real keys. Keep GEMINI_API_KEY and SUPABASE_SERVICE_ROLE_KEY in env only.
+- ai.service.js has a temporary hardcoded key for local testing—remove before deployment.
+
+---
+
+## CORS
+
+- src/server.js sets up Express + CORS.
+- Recommended: restrict to your Vercel domain(s) and localhost during dev.
+- FRONTEND_URL/ALLOWED_ORIGINS are used to control origins (see server.js CORS options).
+
+---
+
+## AI Integration (Gemini)
+
+- ai.service.js
+  - Builds a structured prompt using game_type, response_data, ai_prompts, and required competencies
+  - Calls @google/generative-ai (v1 models: gemini-1.5-flash/pro) with REST v1 fallback
+  - Parses strict JSON from the model, clamps each competency 0–100, returns { [competency]: number, feedback }
+
+Common errors
+- 404 model not found → switch to v1 models (gemini-1.5-flash/pro or 1.0-pro)
+- Auth/billing disabled → enable Generative Language API and billing in Google Cloud
+
+---
+
+## Scoring Engines
+
+- calculator.service.js (hand‑coded formulas per traditional games)
+  - Implements calculators like sign_sudoku, card_flip_challenge, etc.
+  - Aggregates final_scores using config.final_weights
+- scoringCalculator.js (dynamic, formula‑driven)
+  - Uses formulaEvaluator + variableExtractor
+  - Reads competency_formulas from config to compute scores
+  - Good for prototyping new games or variable‑based scoring
+
+---
+
+## Card Flip Challenge Details
+
+game_type: card_flip_challenge
+- Endpoint to submit/save: POST /api/games/submit
+- Active config: GET /api/scoring/active/card_flip_challenge
+- History: GET /api/games/results/card_flip_challenge?userId=UUID
+
+Expected raw_data:
+- correct_pairs, total_pairs, total_flips, minimum_flips
+- time_taken, time_limit
+- session_pattern_type: mirror | sequential | split | adjacentColumn
+- discovery_move: integer (0 or omitted → not discovered)
+- correct_matches: [{ pos1, pos2 }, ...] with flattened positions 0..N-1 (N = total_pairs*2)
+
+Scoring (calculator.service.js → calculateCardFlip):
+- accuracy = (correct_pairs / total_pairs) * 100
+- strategy_efficiency = (minimum_flips / total_flips) * 100
+- speed = max(0, ((time_limit - time_taken) / time_limit) * 100)
+- pattern_recognition:
+  - Pattern checkers by session_pattern_type:
+    - mirror: pos1 + pos2 === N - 1
+    - sequential: |pos1 - pos2| === 1 and min(pos1,pos2) even
+    - split: |pos1 - pos2| === N / 2
+    - adjacentColumn: same row and adjacent cols (min col even); grid width inferred from N
+  - base = (#patternMatches / correct_matches.length) * 100
+  - early discovery bonus up to +20 (lower discovery_move → higher bonus)
+  - penalty if many non‑pattern matches (heuristic)
+  - clamp 0..100
+- final_score = sum(competency * weight) using config.final_weights
+- raw_stats saved: correct_pairs, total_flips, time_taken, pattern_discovered, pattern_type
+
+Common save issues:
+- Using /api/ai/submit-game instead of /api/games/submit (this is a non‑AI game)
+- Missing/invalid final_weights keys (must include accuracy, strategy_efficiency, speed, pattern_recognition)
+- Mismatch between total_pairs and correct_matches (positions out of range)
+- Supabase env vars missing on the server
+
+---
+
+## Content
+
+- content.controller.js currently returns mocked defaults (e.g., ai_debate statement “Remote work…”).
+- To switch to DB content, create a game_content table and query it here.
+
+---
+
+## Testing (Windows/PowerShell)
+
+Health
+- Invoke-RestMethod -Uri "http://localhost:3000/health"
+
+Configs
+- Invoke-RestMethod -Uri "http://localhost:3000/api/scoring/active/ai_debate" | ConvertTo-Json -Depth 6
+- Invoke-RestMethod -Uri "http://localhost:3000/api/scoring/active/card_flip_challenge" | ConvertTo-Json -Depth 6
+
+AI score preview (no save)
+- Invoke-RestMethod -Method POST "http://localhost:3000/api/ai/score" -Headers @{ "Content-Type"="application/json" } -Body '{ "game_type":"ai_debate", "response_data":{ "topic":"Is remote work better?", "user_argument":"..." } }'
+
+AI submit (save)
+- Invoke-RestMethod -Method POST "http://localhost:3000/api/ai/submit-game" -Headers @{ "Content-Type"="application/json" } -Body '{ "game_type":"ai_debate", "user_id":"UUID", "response_data":{ "topic":"...", "user_argument":"..." } }'
+
+Non‑AI submit (Card Flip)
+- Invoke-RestMethod -Method POST "http://localhost:3000/api/games/submit" -Headers @{ "Content-Type"="application/json" } -Body '{ "game_type":"card_flip_challenge", "user_id":"UUID", "raw_data":{ /* see raw_data above */ } }'
+
+History
+- Invoke-RestMethod -Uri "http://localhost:3000/api/games/results/ai_debate?userId=UUID"
+- Invoke-RestMethod -Uri "http://localhost:3000/api/games/results/card_flip_challenge?userId=UUID"
+
+---
+
+## File Index (known)
+
+- src/server.js
+  - Express app, JSON/body parsing, CORS, mounts routes, health endpoint
+- src/config/supabase.js
+  - Creates Supabase client from env; server‑side service role key
+- src/routes/ai.routes.js
+  - POST /api/ai/score, POST /api/ai/submit-game
+- src/routes/games.routes.js
+  - Non‑AI game submission endpoints (e.g., POST /api/games/submit)
+- src/routes/scoring.routes.js
+  - GET /api/scoring/active/:gameType
+- src/routes/content.routes.js
+  - GET /api/content/:gameType (mocked content)
+- src/controllers/ai.controller.js
+  - Orchestrates AI scoring and persistence for AI games
+- src/controllers/content.controller.js
+  - Returns mock content payloads for game types
+- src/controllers/games.controller.js (if present)
+  - Handles non‑AI game submissions and persistence
+- src/controllers/scoring.controller.js (if present)
+  - Reads active scoring version/config from Supabase
+- src/services/ai.service.js
+  - Gemini integration: prompt build, model call, JSON parsing, clamping
+- src/services/calculator.service.js
+  - Hand‑coded calculators per traditional game, final weight aggregation
+- src/services/scoringCalculator.js
+  - Dynamic, formula‑based scoring engine (uses expr-eval), logs variables
+- src/services/formulaEvaluator.js
+  - Safe expression evaluation (expr-eval), helpers min/max/clamp
+- src/services/variableExtractor.js
+  - Extracts variables from raw payloads per game for dynamic formulas
+- DOCS/TESTING_GUIDE.md
+  - Example curl/PowerShell usage to test endpoints
+
+Note: Some controller files are inferred from routes; if absent, logic may be co‑located or differently named.
+
+Generate a full file list (optional):
+- PowerShell: `Get-ChildItem -Recurse -File | ForEach-Object { $_.FullName.Substring((Get-Location).Path.Length+1) } | Sort-Object`
+
+---
+
+## Deployment (Render)
+
+- Build: `npm ci`
+- Start: `npm start` (or `node src/server.js`)
+- Health check: `/health`
+- Env vars: NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_API_KEY, FRONTEND_URL, NODE_ENV=production
+- Restrict CORS to your Vercel domain(s)
+
+---
+
+## Troubleshooting
+
+- AI 404 model: switch to v1 models (gemini-1.5-flash/pro) in ai.service.js
+- Empty history: likely used /api/ai/score (no save) or wrong userId/game_type
+- Card Flip saves fail: missing weights or malformed raw_data.correct_matches
+- Supabase errors: check service role key and URL; see server logs
